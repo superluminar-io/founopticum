@@ -4,13 +4,19 @@ Transform: AWS::Serverless-2016-10-31
 Parameters:
   SuperwerkerDomain:
     Type: String
+  SuperwerkerStackName:
+    Type: String
+    Description: Name of the parent superwerker CloudFormation stack
 
 Resources:
-
   DashboardGeneratorFunction:
     Type: AWS::Serverless::Function
     Properties:
       Events:
+        DailyGeneration:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
         EmailHealth:
           Type: CloudWatchEvent
           Properties:
@@ -22,8 +28,9 @@ Resources:
               detail:
                 alarmName:
                   - superwerker-RootMailReady
-
       Handler: index.handler
+      Runtime: python3.7
+      Timeout: 60
       Policies:
         - SSMParameterReadPolicy:
             ParameterName: 'superwerker/*'
@@ -35,17 +42,49 @@ Resources:
             - Effect: Allow
               Action: cloudwatch:DescribeAlarms
               Resource: '*'
+            - Effect: Allow
+              Action: cloudformation:GetTemplateSummary
+              Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${SuperwerkerStackName}/*
       Environment:
         Variables:
           SUPERWERKER_DOMAIN: !Ref SuperwerkerDomain
+          SUPERWERKER_STACK_NAME: !Ref SuperwerkerStackName
       InlineCode: |
         import boto3
         import json
         import os
+        import urllib.request
+        import urllib.parse
+
         from datetime import datetime
 
         cw = boto3.client("cloudwatch")
+        cfn = boto3.client("cloudformation")
         ssm = boto3.client("ssm")
+
+        def get_latest_version():
+          response = urllib.request.urlopen('https://api.github.com/repos/superwerker/superwerker/releases/latest').read()
+          data = json.loads(response.decode('utf-8'))
+          
+          return data['name']
+
+        def get_current_version():
+          response = cfn.get_template_summary(
+              StackName=os.getenv('SUPERWERKER_STACK_NAME')
+          )
+          
+          metadata = json.loads(response['Metadata'])
+          
+          return metadata['SuperwerkerVersion']
+
+        def get_version_label():
+          current = get_current_version()
+          release = get_latest_version()
+          
+          if current == release:
+              return "🛠 Version: {version} (No updates available)".format(version=current)
+          else:
+              return "🛠 Version: {version} ([{release} available on GitHub](https://github.com/superwerker/superwerker))".format(version=current, release=release)
 
         def handler(event, context):
 
@@ -68,14 +107,17 @@ Resources:
             dns_delegation_text = """
         #### 🏠 {domain}
         #### ✅ DNS configuration is set up correctly. 
+        #### {version}
         """.format(
           domain=os.environ['SUPERWERKER_DOMAIN'],
+          version=get_version_label(),
         )
           else:
             if '/superwerker/domain_name_servers' in superwerker_config:
               dns_delegation_text = """
         #### 🏠 {domain}
         #### ❌ DNS configuration needed. 
+        #### {version}
 
         &nbsp;
 
@@ -92,6 +134,7 @@ Resources:
         """.format(
           domain=os.environ['SUPERWERKER_DOMAIN'],
           ns=superwerker_config['/superwerker/domain_name_servers'].split(','),
+          version=get_version_label(),
         )
             else:
               dns_delegation_text = '### DNS Setup pending'
@@ -134,10 +177,6 @@ Resources:
 
         def log(msg):
           print(json.dumps(msg), flush=True)
-
-
-      Runtime: python3.7
-      Timeout: 60
 
 Metadata:
   SuperwerkerVersion: 0.0.0-DEVELOPMENT
